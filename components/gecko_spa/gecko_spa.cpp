@@ -1,6 +1,7 @@
 #include "gecko_spa.h"
 #include "esphome/core/log.h"
 #include <ctime>
+#include <cmath>
 
 namespace esphome {
 namespace gecko_spa {
@@ -499,6 +500,14 @@ void GeckoSpa::process_i2c_message(const uint8_t *data, uint8_t len) {
                customer_id, num_zones,
                silent_mode < 5 ? silent_str[silent_mode] : "?");
 
+      // Setpoint pre klimu berieme z config ramca - status nesie "real"
+      // setpoint, ktory je v uspornom rezime zniZeny o fixny offset.
+      if (setpoint_raw != 0 && fabsf(setpoint_c - target_temp_) > 0.05f) {
+        target_temp_ = setpoint_c;
+        ESP_LOGI(TAG, "Setpoint z configu: %.1f C", target_temp_);
+        update_climate_state();
+      }
+
       // Reuse the status parser on the status portion, if we know what the length of the
       // status message should be.
       if (status_msg_len_ != 0) {
@@ -596,9 +605,12 @@ void GeckoSpa::parse_status_message(const uint8_t *data) {
   uint8_t pumpTime = data[b_udPumpTime];
 
   // Temperature (word values, big-endian)
+  // POZOR: realSetPointG je efektivny setpoint packu, nie ten, ktory nastavil
+  // uzivatel. V usporneho rezime je znizeny, preto sa do klimy NEPOSIELA -
+  // target berieme z config ramca.
   uint16_t target_raw = (data[b_realSetPoint] << 8) | data[b_realSetPoint + 1];
   uint16_t actual_raw = (data[b_displayedTemp] << 8) | data[b_displayedTemp + 1];
-  float target_temp = target_raw / 18.0f;
+  float real_setpoint = target_raw / 18.0f;
   float actual_temp = actual_raw / 18.0f;
 
   // === Log decoded status (geckolib format) ===
@@ -608,8 +620,8 @@ void GeckoSpa::parse_status_message(const uint8_t *data) {
            lockMode < 3 ? lock_str[lockMode] : "?",
            packType < 11 ? pack_str[packType] : "?");
 
-  ESP_LOGI(TAG, "Status: Temp=%.1f/%.1f°C Heater=%s CP=%s BL=%s Waterfall=%s",
-           target_temp, actual_temp,
+  ESP_LOGI(TAG, "Status: RealSetpoint=%.1f Temp=%.1f°C Heater=%s CP=%s BL=%s Waterfall=%s",
+           real_setpoint, actual_temp,
            heater_on ? "ON" : "OFF",
            cp_on ? "ON" : "OFF",
            bl_on ? "ON" : "OFF",
@@ -641,9 +653,8 @@ void GeckoSpa::parse_status_message(const uint8_t *data) {
   uint8_t new_p3 = p3_state;
   uint8_t new_p4 = p4_state;
 
-  float new_target = target_temp;
   float new_actual = actual_temp;
-  bool temp_valid = (target_raw != 0 || actual_raw != 0);
+  bool temp_valid = (actual_raw != 0);
 
   // On first status message, publish all states
   bool first = !first_status_received_;
@@ -719,10 +730,9 @@ void GeckoSpa::parse_status_message(const uint8_t *data) {
   }
 
   // Only update temperature if valid data was received
-  if (temp_valid && (first || abs(new_target - target_temp_) > 0.1 || abs(new_actual - actual_temp_) > 0.1)) {
-    target_temp_ = new_target;
+  if (temp_valid && (first || fabsf(new_actual - actual_temp_) > 0.05f)) {
     actual_temp_ = new_actual;
-    ESP_LOGI(TAG, "Temp: target=%.1f actual=%.1f", target_temp_, actual_temp_);
+    ESP_LOGI(TAG, "Temp: actual=%.1f (target=%.1f)", actual_temp_, target_temp_);
     update_climate_state();
   }
 
@@ -753,22 +763,18 @@ void GeckoSpa::update_climate_state() {
   if (!climate_)
     return;
 
-  climate_->target_temperature = target_temp_;
+  // target_temp_ je 0, kym nepride prvy config ramec (raz za ~23s s GO).
+  // Dovtedy nechaj hodnotu zo setup() alebo od uzivatela z HA.
+  if (target_temp_ > 0)
+    climate_->target_temperature = target_temp_;
   climate_->current_temperature = actual_temp_;
 
-  // Set mode based on target vs actual temperature
-  if (target_temp_ < actual_temp_) {
-    climate_->mode = climate::CLIMATE_MODE_COOL;
-  } else {
-    climate_->mode = climate::CLIMATE_MODE_HEAT;
-  }
-
-  // Set action based on heating flag and temperature comparison
-  // heating_state_ is the authoritative source for whether heater is running
+  // Akcia sa odvodzuje od skutocneho stavu ohrevu, nie od porovnania teplot.
   if (heating_state_) {
+    climate_->mode = climate::CLIMATE_MODE_HEAT;
     climate_->action = climate::CLIMATE_ACTION_HEATING;
-  } else if (target_temp_ < actual_temp_) {
-    // Spa is cooling down (no active cooling, just natural heat loss)
+  } else if (target_temp_ > 0 && actual_temp_ > target_temp_ + 0.5f) {
+    climate_->mode = climate::CLIMATE_MODE_COOL;
     climate_->action = climate::CLIMATE_ACTION_COOLING;
   } else {
     climate_->action = climate::CLIMATE_ACTION_IDLE;
