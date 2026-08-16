@@ -579,8 +579,13 @@ void GeckoSpa::parse_status_message(const uint8_t *data) {
   uint8_t devStatus = data[b_deviceStatus];
   bool cp_on = (devStatus >> 2) & 0x01;      // bit 2: CP (circulation pump)
   bool bl_on = (devStatus >> 1) & 0x01;      // bit 1: BL (blower)
-  bool heater_on = (devStatus >> 3) & 0x01;  // bit 3: MSTR_HEATER (overuje sa)
   bool waterfall = (devStatus >> 7) & 0x01;  // bit 7: Waterfall
+
+  // Ziadost o ohrev: status bajt 130 (geckolib offset 384), bit 5.
+  // Overene proti realnemu behu tepelneho cerpadla - v devStatus ohrev nie je.
+  static const uint16_t B_HEAT_DEMAND = 130;
+  uint8_t heat_raw = data[B_HEAT_DEMAND];
+  bool heater_on = (heat_raw >> 5) & 0x01;
 
   // P1-P4 device status (2-bit fields)
   uint8_t p1_raw = data[b_p1];
@@ -620,13 +625,13 @@ void GeckoSpa::parse_status_message(const uint8_t *data) {
            lockMode < 3 ? lock_str[lockMode] : "?",
            packType < 11 ? pack_str[packType] : "?");
 
-  ESP_LOGI(TAG, "Status: RealSetpoint=%.1f Temp=%.1f°C Heater=%s CP=%s BL=%s Waterfall=%s (devStatus=0x%02X)",
+  ESP_LOGI(TAG, "Status: RealSetpoint=%.1f Temp=%.1f°C Heater=%s CP=%s BL=%s Waterfall=%s (dev=0x%02X heat=0x%02X)",
            real_setpoint, actual_temp,
            heater_on ? "ON" : "OFF",
            cp_on ? "ON" : "OFF",
            bl_on ? "ON" : "OFF",
            waterfall ? "ON" : "OFF",
-           devStatus);
+           devStatus, heat_raw);
 
   ESP_LOGI(TAG, "Status: P1=%s P2=%s P3=%s P4=%s PumpTimer=%dmin",
            pump_state_str[p1_state], pump_state_str[p2_state],
