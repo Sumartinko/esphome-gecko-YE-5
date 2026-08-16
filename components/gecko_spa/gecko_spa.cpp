@@ -579,7 +579,7 @@ void GeckoSpa::parse_status_message(const uint8_t *data) {
   uint8_t devStatus = data[b_deviceStatus];
   bool cp_on = (devStatus >> 2) & 0x01;      // bit 2: CP (circulation pump)
   bool bl_on = (devStatus >> 1) & 0x01;      // bit 1: BL (blower)
-  bool heater_on = (devStatus >> 5) & 0x01;  // bit 5: MSTR_HEATER
+  bool heater_on = (devStatus >> 3) & 0x01;  // bit 3: MSTR_HEATER (overuje sa)
   bool waterfall = (devStatus >> 7) & 0x01;  // bit 7: Waterfall
 
   // P1-P4 device status (2-bit fields)
@@ -620,12 +620,13 @@ void GeckoSpa::parse_status_message(const uint8_t *data) {
            lockMode < 3 ? lock_str[lockMode] : "?",
            packType < 11 ? pack_str[packType] : "?");
 
-  ESP_LOGI(TAG, "Status: RealSetpoint=%.1f Temp=%.1f°C Heater=%s CP=%s BL=%s Waterfall=%s",
+  ESP_LOGI(TAG, "Status: RealSetpoint=%.1f Temp=%.1f°C Heater=%s CP=%s BL=%s Waterfall=%s (devStatus=0x%02X)",
            real_setpoint, actual_temp,
            heater_on ? "ON" : "OFF",
            cp_on ? "ON" : "OFF",
            bl_on ? "ON" : "OFF",
-           waterfall ? "ON" : "OFF");
+           waterfall ? "ON" : "OFF",
+           devStatus);
 
   ESP_LOGI(TAG, "Status: P1=%s P2=%s P3=%s P4=%s PumpTimer=%dmin",
            pump_state_str[p1_state], pump_state_str[p2_state],
@@ -769,16 +770,20 @@ void GeckoSpa::update_climate_state() {
     climate_->target_temperature = target_temp_;
   climate_->current_temperature = actual_temp_;
 
-  // Akcia sa odvodzuje od skutocneho stavu ohrevu, nie od porovnania teplot.
-  if (heating_state_) {
-    climate_->mode = climate::CLIMATE_MODE_HEAT;
-    climate_->action = climate::CLIMATE_ACTION_HEATING;
-  } else if (target_temp_ > 0 && actual_temp_ > target_temp_ + 0.5f) {
+  // Mode = co by pack musel urobit, aby dosiahol setpoint.
+  // Prepocitava sa vzdy, inak by COOL zostal visiet aj po zvyseni setpointu.
+  if (target_temp_ > 0 && actual_temp_ > target_temp_ + 0.5f)
     climate_->mode = climate::CLIMATE_MODE_COOL;
+  else
+    climate_->mode = climate::CLIMATE_MODE_HEAT;
+
+  // Action = co realne robi prave teraz.
+  if (heating_state_)
+    climate_->action = climate::CLIMATE_ACTION_HEATING;
+  else if (climate_->mode == climate::CLIMATE_MODE_COOL)
     climate_->action = climate::CLIMATE_ACTION_COOLING;
-  } else {
+  else
     climate_->action = climate::CLIMATE_ACTION_IDLE;
-  }
 
   climate_->publish_state();
 }
